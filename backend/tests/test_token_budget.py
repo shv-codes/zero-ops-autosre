@@ -59,7 +59,7 @@ def test_limiter_waits_for_the_window_instead_of_failing():
 
 def test_client_retries_after_rate_limit_using_server_hint():
     waits = []
-    client = OpenAICompatClient(LLMSettings("groq", "https://x", "gsk_test_key_not_real_123456", "openai/gpt-oss-120b",
+    client = OpenAICompatClient(LLMSettings("nvidia", "https://x", "nvapi-test-key-not-real-123456", "openai/gpt-oss-120b",
                                             tokens_per_minute=8000), sleep=waits.append)
     calls = {"n": 0}
     sent = {}
@@ -79,6 +79,66 @@ def test_client_retries_after_rate_limit_using_server_hint():
     assert calls["n"] == 2 and waits == [7.0]
     assert sent["extra_body"] == {"reasoning_effort": "low"}  # gpt-oss keeps hidden reasoning short
     assert client.prompt_budget == 8000 - 1024 - OpenAICompatClient.SAFETY_MARGIN_TOKENS
+
+
+def test_groq_429_switches_to_the_next_model_without_waiting():
+    from agent.coding.llm import FallbackChatClient, LLMRateLimited
+
+    rpm = _rate_limit("Rate limit reached on tokens per minute (TPM). Please try again in 7s.", retry_after="7")
+
+    def make(model, error=None):
+        waits = []
+        c = OpenAICompatClient(LLMSettings("groq", "https://x", "gsk_test_key_not_real_123456", model), sleep=waits.append)
+
+        def create(**kwargs):
+            if error:
+                raise error
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=model, tool_calls=[]))],
+                                   usage=None)
+
+        c._client.chat.completions.create = create
+        return c, waits
+
+    primary, waits = make("openai/gpt-oss-120b", rpm)
+    try:
+        primary.complete([], [])
+        raise AssertionError("expected LLMRateLimited")
+    except LLMRateLimited as exc:
+        assert waits == [] and exc.retry_after == 7
+
+    backup, _ = make("openai/gpt-oss-20b")
+    switches = []
+    chain_waits = []
+    chain = FallbackChatClient([primary, backup], on_switch=lambda a, b, why: switches.append((a, b)),
+                               sleep=chain_waits.append)
+    assert chain.complete([], []).content == "openai/gpt-oss-20b"
+    assert chain_waits == []
+    assert switches == [("openai/gpt-oss-120b", "openai/gpt-oss-20b")]
+
+
+def test_last_groq_model_retries_a_429_with_jitter():
+    import random
+
+    from agent.coding.llm import FallbackChatClient, _jittered_wait
+
+    calls = {"n": 0}
+    ok = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=[]))], usage=None)
+    client = OpenAICompatClient(LLMSettings("groq", "https://x", "gsk_test_key_not_real_123456", "qwen/qwen3.8-27b",
+                                            rate_limit_retries=1))
+
+    def create(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _rate_limit("Rate limit reached on requests per minute (RPM). Please try again in 7s.", retry_after="7")
+        return ok
+
+    client._client.chat.completions.create = create
+    waits = []
+    rng = random.Random(0)
+    expected = _jittered_wait(7, 0, random.Random(0))
+    chain = FallbackChatClient([client], sleep=waits.append, rng=rng)
+    assert chain.complete([], []).content == "ok"
+    assert calls["n"] == 2 and waits == [expected] and expected > 7
 
 
 def _rate_limit(msg, retry_after=None):

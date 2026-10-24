@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 
 from django.conf import settings
@@ -13,13 +14,14 @@ from correlation.correlator import GitCorrelator
 from delivery.providers import DeliveryError, get_provider
 from agent.approvals import AutoApproval
 from guardrails.injection import build_screen
-from sandbox.runner import get_sandbox
+from sandbox.runner import CachedSandbox, get_sandbox
 from telemetry import get_adapter
 
 from .models import Incident, RunMode, RuntimeConfig, TelemetrySample
 from .approvals import DjangoApprovalGate
 from .memory import DjangoIncidentMemory
 from .recorder import DjangoRecorder
+from .runner import stop_requested
 
 logger = logging.getLogger("autosre.wiring")
 
@@ -84,15 +86,27 @@ def run_incident(incident_id: str) -> None:
     incident.max_attempts = incident.max_attempts or config.max_attempts
     cfg = pipeline_config()
     cfg.max_attempts = incident.max_attempts
+    if incident.source == "prototype":
+        from demo.fixture import FixtureAdapter, prototype_log_path
+
+        adapter = FixtureAdapter()
+        log_path = str(prototype_log_path())
+        sandbox = CachedSandbox(timeout=settings.SANDBOX["TIMEOUT_SECONDS"])
+        cfg.demo_conflict_after_ready = True
+        cfg.pr_poll_seconds = 1
+    else:
+        adapter = get_adapter()
+        log_path = settings.TARGET_APP["LOG_PATH"]
+        sandbox = get_sandbox()
 
     deps = AgentDeps(
         recorder=recorder,
-        adapter=get_adapter(),
-        log_path=settings.TARGET_APP["LOG_PATH"],
+        adapter=adapter,
+        log_path=log_path,
         correlator=GitCorrelator(settings.TARGET_REPO["PATH"], settings.TARGET_REPO["BASE_BRANCH"],
                                  settings.TARGET_REPO["LOOKBACK_COMMITS"], settings.TARGET_REPO["LOOKBACK_DAYS"]),
         provider=provider,
-        sandbox=get_sandbox(),
+        sandbox=sandbox,
         mode=incident.mode,
         live_client_factory=lambda: build_live_client(
             config.llm_provider,
@@ -106,5 +120,7 @@ def run_incident(incident_id: str) -> None:
         approvals=DjangoApprovalGate(incident_id, recorder, settings.AUTOSRE["APPROVAL_TIMEOUT_SECONDS"])
         if incident.approval_mode == "review" else AutoApproval(),
         memory=DjangoIncidentMemory(),
+        should_stop=lambda: stop_requested(incident_id),
+        sleep=time.sleep,
     )
     run_pipeline(incident_id, incident.alert, deps)

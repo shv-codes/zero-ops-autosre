@@ -33,6 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "victim_service"
 DEFAULT_VAR = ROOT / "var"
+SEED_ANCHOR = datetime(2026, 10, 23, 12, 0, 0, tzinfo=timezone.utc)
 
 IGNORED_PARTS = {"__pycache__", "logs", ".pytest_cache"}
 IGNORED_NAMES = {"db.sqlite3"}
@@ -180,7 +181,9 @@ def seed(var: Path = DEFAULT_VAR, force: bool = False) -> tuple[Path, Path]:
     git("init", "-q", "-b", "main", cwd=build)
     git("config", "core.autocrlf", "false", cwd=build)
 
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    # Fixed anchor date: identical content + authors + dates = identical commit hashes on every
+    # re-seed, so the demo always shows the same suspect commit (e.g. Charlie's leak) to judges.
+    now = SEED_ANCHOR
     for who, days_ago, message, files, stage in COMMITS:
         for rel in files:
             write_lf(build / rel, read_lf(SOURCE / rel))

@@ -2,6 +2,8 @@
 
 ### From production incident to verified fix — autonomously.
 
+🔗 **Live Landing Page:** [https://landing-page-for-auto-sre.vercel.app/](https://landing-page-for-auto-sre.vercel.app/)
+
 AutoSRE is an AI-powered Site Reliability Engineering agent that detects database incidents, mitigates the immediate impact, investigates likely root causes, and uses a coding agent to develop and test a fix in a sandbox. It then opens a pull request and monitors it for failing CI or merge conflicts until it is ready for human review.
 
 **The goal:** reduce the manual work between detecting an incident and delivering a verified, reviewable fix—without handing control of production merges to an AI agent.
@@ -258,8 +260,9 @@ zero-ops-autosre/
 └── README.md
 ```
 
-## Documentation
+## Documentation & Links
 
+- 🌐 **Live Landing Page:** [https://landing-page-for-auto-sre.vercel.app/](https://landing-page-for-auto-sre.vercel.app/)
 - [How AutoSRE works](docs/HOW_IT_WORKS.md)
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [GitHub App setup](docs/GITHUB_APP_SETUP.md)

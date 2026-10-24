@@ -8,12 +8,15 @@ import { ConnectionGraph } from "@/components/ConnectionGraph"
 import { MttrCard } from "@/components/MttrCard"
 import { SuspectCard } from "@/components/SuspectCard"
 import { PrCard } from "@/components/PrCard"
+import { ReviewPanel } from "@/components/ReviewPanel"
 import { DetailTabs } from "@/components/DetailTabs"
 import { GuardrailsPanel } from "@/components/GuardrailsPanel"
 import { DemoControlSheet } from "@/components/DemoControlSheet"
 import { ApprovalCard } from "@/components/ApprovalCard"
+import { ConfirmDialog } from "@/components/ConfirmDialog"
+import { useTheme } from "@/components/theme-provider"
 import {
-  isActive, useConfig, useGuardrails, useIncident, useIncidents, useSystem, useTelemetry, useTelemetryHistory, useTimeline,
+  isActive, useConfig, useDeleteIncident, useForceStop, useGuardrails, useIncident, useIncidents, useSystem, useTelemetry, useTelemetryHistory, useTimeline,
 } from "@/hooks/useAutoSRE"
 import { STATUS_LABEL } from "@/lib/format"
 
@@ -22,6 +25,7 @@ export const Dashboard: React.FC = () => {
   const [controlsOpen, setControlsOpen] = useState(false)
   const pinned = useRef(false)
 
+  const { resolved: resolvedTheme } = useTheme()
   const system = useSystem()
   const incidents = useIncidents()
   const incident = useIncident(selectedId).data
@@ -30,6 +34,34 @@ export const Dashboard: React.FC = () => {
   const config = useConfig().data
   const guardrails = useGuardrails(selectedId, isActive(incident?.status)).data?.checks || []
   const timeline = useTimeline(selectedId, incident?.timeline)
+  const forceStop = useForceStop()
+  const deleteIncident = useDeleteIncident()
+
+  // Destructive actions go through a confirmation modal first.
+  const [pending, setPending] = useState<{ kind: "delete" | "stop"; id: string } | null>(null)
+  const stopIncident = (id: string) => setPending({ kind: "stop", id })
+  const removeIncident = (id: string) => setPending({ kind: "delete", id })
+  const confirmPending = () => {
+    if (!pending) return
+    const { kind, id } = pending
+    const done = { onSettled: () => setPending(null), onError: (e: unknown) => toast.error((e as Error).message) }
+    if (kind === "stop") {
+      forceStop.mutate(id, { ...done, onSuccess: () => toast.success(`${id} force-stopped`) })
+      return
+    }
+    deleteIncident.mutate(id, {
+      ...done,
+      onSuccess: () => {
+        if (id === selectedId) {
+          pinned.current = false
+          setSelectedId(undefined)
+        }
+        toast.success(`${id} deleted`)
+      },
+    })
+  }
+  const stopSelected = () => selectedId && stopIncident(selectedId)
+  const deleteSelected = () => selectedId && removeIncident(selectedId)
 
   // Coming back from GitHub's install page: ?github=connected | ?github=error&reason=...
   useEffect(() => {
@@ -62,34 +94,54 @@ export const Dashboard: React.FC = () => {
   const backendError = system.error ? (system.error as Error).message : undefined
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
-      <Toaster richColors position="bottom-right" theme="dark" />
+    <div className="flex min-h-screen flex-col bg-muted/30 text-foreground dark:bg-background">
+      <Toaster position="bottom-right" theme={resolvedTheme} richColors closeButton
+               toastOptions={{ className: "font-sans" }} />
       <Header system={system.data} backendError={backendError} incident={incident} onOpenControls={() => setControlsOpen(true)} />
-      <div className="flex-1 flex flex-col md:flex-row min-h-0">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <Sidebar incidents={incidents.data || []} selectedId={selectedId}
-                 onSelect={(id) => { pinned.current = true; setSelectedId(id) }} />
-        <main className="flex-1 overflow-y-auto p-4 lg:p-6 space-y-6">
-          <PipelineStepper incident={incident} />
+                 onSelect={(id) => { pinned.current = true; setSelectedId(id) }}
+                 onDelete={removeIncident} onStop={stopIncident}
+                 busy={deleteIncident.isPending || forceStop.isPending} />
+        <main className="mx-auto w-full min-w-0 max-w-[1600px] flex-1 space-y-4 p-3 sm:space-y-6 sm:p-4 lg:p-6">
+          <PipelineStepper incident={incident} onForceStop={stopSelected} onDelete={deleteSelected}
+                           stopping={forceStop.isPending} deleting={deleteIncident.isPending} />
           <ApprovalCard incident={incident} />
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 gap-4 sm:gap-6 xl:grid-cols-2">
             <LiveTerminal timeline={timeline} />
             <ConnectionGraph history={history} current={telemetry.data}
                              error={telemetry.error ? (telemetry.error as Error).message : undefined}
                              threshold={config?.alert_threshold || 0.9} />
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 gap-4 sm:gap-6 md:grid-cols-2 xl:grid-cols-3">
             <MttrCard incident={incident} />
             <SuspectCard incident={incident} />
             <PrCard incident={incident} />
           </div>
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <ReviewPanel incident={incident} />
+          <div className="grid grid-cols-1 gap-4 sm:gap-6 xl:grid-cols-3">
             <div className="xl:col-span-2"><DetailTabs incident={incident} /></div>
             <GuardrailsPanel checks={guardrails} />
           </div>
         </main>
       </div>
       <DemoControlSheet open={controlsOpen} onClose={() => setControlsOpen(false)} system={system.data}
+                        incidentId={selectedId} incidentStatus={incident?.status}
+                        onForceStop={stopSelected} onDelete={deleteSelected}
+                        stopping={forceStop.isPending} deleting={deleteIncident.isPending}
                         onIncidentCreated={(id) => { pinned.current = false; setSelectedId(id) }} />
+      <ConfirmDialog
+        open={!!pending}
+        tone={pending?.kind === "stop" ? "warning" : "danger"}
+        title={pending?.kind === "stop" ? `Force-stop ${pending.id}?` : `Delete ${pending?.id}?`}
+        description={pending?.kind === "stop"
+          ? <>The agent stops immediately and the incident is marked <strong className="text-foreground">escalated</strong> for a human to take over.</>
+          : <>This permanently removes the incident, its timeline, agent steps, sandbox runs and <strong className="text-foreground">audit trail</strong>. This can't be undone. Export the audit JSON first if you need it.</>}
+        confirmLabel={pending?.kind === "stop" ? "Force-stop" : "Delete incident"}
+        busy={deleteIncident.isPending || forceStop.isPending}
+        onConfirm={confirmPending}
+        onCancel={() => setPending(null)}
+      />
     </div>
   )
 }

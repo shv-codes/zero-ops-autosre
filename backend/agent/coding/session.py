@@ -38,7 +38,7 @@ def usage_of(client) -> dict:
 def run_coding_task(*, mode: str, live_client_factory: Callable[[], ChatClient],
                     recording: ScriptedClient | None, make_toolbox: Callable[[], ToolBox],
                     restart: Callable[[], None], recorder, system_prompt: str, task_prompt: str,
-                    max_steps: int) -> tuple[AgentResult, BrainInfo]:
+                    max_steps: int, should_stop: Callable[[], bool] | None = None) -> tuple[AgentResult, BrainInfo]:
     info = BrainInfo(mode=mode)
     client: ChatClient | None = None
 
@@ -60,7 +60,7 @@ def run_coding_task(*, mode: str, live_client_factory: Callable[[], ChatClient],
 
     toolbox = make_toolbox()
     try:
-        result = CodingAgent(client, toolbox, recorder, max_steps).run(system_prompt, task_prompt)
+        result = CodingAgent(client, toolbox, recorder, max_steps, should_stop=should_stop).run(system_prompt, task_prompt)
         info.usage = usage_of(client)
         return result, info
     except LLMUnavailable as exc:
@@ -75,7 +75,7 @@ def run_coding_task(*, mode: str, live_client_factory: Callable[[], ChatClient],
     restart()
     toolbox = make_toolbox()
     try:
-        result = CodingAgent(recording, toolbox, recorder, max_steps).run(system_prompt, task_prompt)
+        result = CodingAgent(recording, toolbox, recorder, max_steps, should_stop=should_stop).run(system_prompt, task_prompt)
         info.usage = usage_of(client) if client is not recording else usage_of(recording)
         return result, info
     finally:

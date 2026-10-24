@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .context import ContextWindow
 from .llm import ChatClient, LLMUnavailable
@@ -35,12 +36,18 @@ class AgentResult:
     last_guardrails: list[dict] = field(default_factory=list)
 
 
+class ForceStopped(Exception):
+    """A person pressed Force stop. The live run should end at this checkpoint."""
+
+
 class CodingAgent:
-    def __init__(self, client: ChatClient, toolbox: ToolBox, recorder, max_steps: int = 30):
+    def __init__(self, client: ChatClient, toolbox: ToolBox, recorder, max_steps: int = 30,
+                 should_stop: Callable[[], bool] | None = None):
         self.client = client
         self.tools = toolbox
         self.recorder = recorder
         self.max_steps = max_steps
+        self.should_stop = should_stop
         self.window = ContextWindow(getattr(client, "prompt_budget", None))
 
     def run(self, system_prompt: str, task_prompt: str) -> AgentResult:
@@ -50,6 +57,8 @@ class CodingAgent:
         step = 0
         idle_turns = 0
         while step < self.max_steps:
+            if self.should_stop and self.should_stop():
+                raise ForceStopped()
             # The model sees a compacted copy; `messages` keeps the full history.
             turn = self.client.complete(self.window.fit(messages, TOOL_SCHEMAS), TOOL_SCHEMAS)  # may raise LLMUnavailable
             self.recorder.audit("response", {"task": self.tools.task, "content": turn.content,
@@ -101,4 +110,4 @@ def _short_args(args: dict) -> dict:
     return {k: (v if not isinstance(v, str) or len(v) <= 4000 else v[:4000] + "...") for k, v in args.items()}
 
 
-__all__ = ["CodingAgent", "AgentResult", "LLMUnavailable"]
+__all__ = ["CodingAgent", "AgentResult", "ForceStopped", "LLMUnavailable"]

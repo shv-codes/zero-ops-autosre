@@ -9,6 +9,7 @@ from django.utils import timezone
 from agent.approvals import ApprovalRequest, Decision
 
 from .models import Incident, IncidentStatus
+from .runner import stop_requested
 
 
 class DjangoApprovalGate:
@@ -33,6 +34,8 @@ class DjangoApprovalGate:
         try:
             while time.monotonic() < deadline:
                 close_old_connections()
+                if stop_requested(self.incident_id):
+                    return Decision(approved=False, by="operator", note="Force-stopped.")
                 pending = Incident.objects.values_list("pending_approval", flat=True).get(pk=self.incident_id) or {}
                 choice = pending.get("decision")
                 if choice in ("approve", "deny"):

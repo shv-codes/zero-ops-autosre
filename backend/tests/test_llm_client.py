@@ -54,6 +54,26 @@ def test_tool_call_written_as_text_is_recovered(client):
     assert c.complete([], tools=[]).tool_calls[0].name == "run_tests"
 
 
+def test_groq_400_malformed_tool_json_is_recovered(client):
+    c, create, _ = client
+
+    def boom(**kwargs):
+        body = {"error": {
+            "message": "Failed to parse tool call arguments as JSON",
+            "type": "invalid_request_error",
+            "code": "tool_use_failed",
+            "failed_generation": '{"name": "read_file", "arguments": {"path":"analytics/views.py","line_start":30,"end_line": fifty}}',
+        }}
+        response = httpx.Response(400, request=httpx.Request("POST", "https://api.groq.com"), json=body)
+        raise openai.BadRequestError("Failed to parse tool call arguments as JSON", response=response, body=body)
+
+    c._client.chat.completions.create = boom
+    turn = c.complete([], tools=[])
+    call = turn.tool_calls[0]
+    assert call.name == "read_file"
+    assert call.arguments == {"path": "analytics/views.py", "start_line": 30, "end_line": 50}
+
+
 def test_api_errors_become_llm_unavailable(client):
     c, create, _ = client
 

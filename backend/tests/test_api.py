@@ -24,7 +24,7 @@ def configured(settings, seeded_repo, tmp_path, monkeypatch):
     settings.VAR_DIR = tmp_path / "var"
     settings.TARGET_APP = {**settings.TARGET_APP, "LOG_PATH": str(log)}
     settings.TARGET_REPO = {**settings.TARGET_REPO, "PATH": str(clone)}
-    settings.DELIVERY = {**settings.DELIVERY, "PROVIDER": "local", "LOCAL_ORIGIN": str(origin)}
+    settings.DELIVERY = {**settings.DELIVERY, "PROVIDER": "local", "LOCAL_ORIGIN": str(origin), "GITHUB_REPO": ""}
     settings.SANDBOX = {**settings.SANDBOX, "ENGINE": "subprocess", "WORK_DIR": str(tmp_path / "sbx")}
     settings.AUTOSRE = {**settings.AUTOSRE, "PR_POLL_SECONDS": 0.05, "PR_WATCH_TIMEOUT_SECONDS": 1}
     adapter = FakeAdapter(leaked=88)
@@ -109,6 +109,99 @@ def test_config_validation():
     assert body(c.patch("/api/v1/config", {"mode": "live", "max_attempts": 2}, content_type="application/json"))["mode"] == "live"
     bad = c.patch("/api/v1/config", {"max_attempts": 99}, content_type="application/json").json()
     assert bad["error"]["code"] == "INVALID_CONFIG"
+
+
+def test_prototype_endpoint_does_not_need_the_victim(configured, settings, monkeypatch):
+    settings.SANDBOX = {**settings.SANDBOX, "ENGINE": "cached"}
+    launched = []
+    monkeypatch.setattr("incidents.runner.launch", lambda incident_id: launched.append(incident_id))
+    c = Client()
+    system = body(c.get("/api/v1/system"))
+    assert system["sandbox"] == {"engine": "cached", "isolated": False, "setting": "cached"}
+    resp = c.post("/api/v1/demo/prototype", {}, content_type="application/json")
+    assert resp.status_code == 201, resp.content
+    data = body(resp)
+    assert data["incident"]["source"] == "prototype"
+    assert data["incident"]["mode"] == "cached"
+    assert data["incident"]["approval_mode"] == "autonomous"
+    assert launched == [data["incident"]["id"]]
+    assert "docker" not in data["message"].lower()
+    again = c.post("/api/v1/demo/prototype", {}, content_type="application/json")
+    assert again.status_code == 409
+
+
+def test_prototype_repairs_the_teammate_commit(configured, settings, monkeypatch):
+    """Fixture database, cached checks, a real commit on main, then the conflict is repaired."""
+    from workspace.gitcmd import git
+
+    origin, _, _ = configured
+    settings.AUTOSRE = {**settings.AUTOSRE, "PR_WATCH_TIMEOUT_SECONDS": 180}
+    incident, created = ingest_alert(
+        {"source": "prototype", "metric": "pg_connections", "value": 98, "max": 100},
+        source="prototype", start=False, mode="cached", approval_mode="autonomous",
+    )
+    assert created
+    calls = {"n": 0}
+
+    def hurry(_seconds):
+        calls["n"] += 1
+        current = Incident.objects.get(pk=incident.id)
+        if current.status == "READY_TO_MERGE" and (current.pull_request or {}).get("rounds", 0) >= 1:
+            from delivery.providers import get_provider
+
+            get_provider().human_merge(int(current.pull_request["number"]))
+        if calls["n"] > 12:
+            raise RuntimeError(f"prototype did not converge ({current.status}: {current.escalation_reason})")
+
+    monkeypatch.setattr("incidents.wiring.time.sleep", hurry)
+    wiring.run_incident(incident.id)
+    incident.refresh_from_db()
+    assert incident.status == "RESOLVED", incident.escalation_reason
+    assert incident.mitigation.get("terminated", 0) > 0
+    assert incident.sandbox_isolated is False
+
+    runs = list(incident.sandbox_runs.order_by("id"))
+    assert [run.engine for run in runs] == ["cached"] * len(runs)
+    assert [run.passed for run in runs[:2]] == [False, True]
+    assert runs[-1].task == "resolve_conflict" and runs[-1].passed is True
+
+    review = incident.pull_request["reviews"][-1]
+    assert review["author"] == "Dana Developer"
+    assert "top 100" in review["message"]
+    assert review["conflicts"] is True
+    assert "analytics/views.py" in review["conflict_files"]
+    assert review["sandbox"]["passed"] is True and review["sandbox"]["engine"] == "cached"
+    assert any("manage.py check" in command for command in review["sandbox"]["commands"])
+    assert any(command.strip() == "python -m pytest" for command in review["sandbox"]["commands"])
+    assert "context manager" in review["repair_summary"]
+    assert any("New commit" in event.message and "Dana Developer" in event.message for event in incident.events.all())
+
+    views = git("show", "main:analytics/views.py", cwd=origin)
+    assert "with report_pool.connection() as conn:" in views and "LIMIT 100" in views
+    assert "<<<<<<<" not in views
+    assert "cached checks" in incident.postmortem
+
+
+def test_force_stop_and_delete_one_incident(configured):
+    incident, created = ingest_alert({"source": "pg-monitor", "metric": "pg_connections", "value": 98, "max": 100},
+                                     start=False)
+    assert created
+    c = Client()
+    stopped = body(c.post(f"/api/v1/incidents/{incident.id}/stop"))
+    assert stopped == {"stopped": True, "id": incident.id}
+    incident.refresh_from_db()
+    assert incident.status == "ESCALATED" and incident.escalation_reason == "Force-stopped."
+
+    from incidents.recorder import DjangoRecorder
+    DjangoRecorder(incident.id).set_status("PATCHING")
+    incident.refresh_from_db()
+    assert incident.status == "ESCALATED"
+
+    deleted = body(c.delete(f"/api/v1/incidents/{incident.id}"))
+    assert deleted == {"deleted": True, "id": incident.id}
+    assert c.get(f"/api/v1/incidents/{incident.id}").status_code == 404
+    assert c.post(f"/api/v1/incidents/{incident.id}/stop").status_code == 404
+    assert c.delete(f"/api/v1/incidents/{incident.id}").status_code == 404
 
 
 def test_replay_reproduces_recorded_run(finished_incident, tmp_path, monkeypatch):

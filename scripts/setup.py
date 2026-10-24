@@ -2,11 +2,11 @@
 """
 One-time (and re-runnable) setup for AutoSRE on Windows, macOS or Linux.
 
-    python scripts/setup.py              # everything
-    python scripts/setup.py --no-docker  # skip docker compose + sandbox image
+    python scripts/setup.py           # prototype: no Docker
+    python scripts/setup.py --docker  # also start Postgres, the victim, and a sandbox image
 
 Steps: check tools -> .venv + backend deps -> .env -> database -> seed victim repo ->
-frontend deps -> (Docker) start Postgres + victim, build the sandbox image.
+frontend deps. Docker is optional and only runs with --docker.
 """
 from __future__ import annotations
 
@@ -41,7 +41,10 @@ def docker_running() -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--no-docker", action="store_true")
+    parser.add_argument("--docker", action="store_true",
+                        help="start PostgreSQL, the victim service, and build the sandbox image")
+    parser.add_argument("--no-docker", action="store_true",
+                        help="ignored; Docker is skipped unless --docker is passed")
     parser.add_argument("--reseed", action="store_true", help="recreate the victim git history")
     args = parser.parse_args()
 
@@ -80,11 +83,11 @@ def main() -> None:
     else:
         print("   npm not found: install Node.js 18+ to run the dashboard")
 
-    if args.no_docker:
-        print("\nSkipping Docker steps (--no-docker).")
+    if not args.docker or args.no_docker:
+        print("\nPrototype mode: skipping Docker. Checks are cached, so no container is required.")
+        print("   Re-run with --docker to start PostgreSQL, the victim service, and a sandbox image.")
     elif not docker_running():
-        print("\n!! Docker is not running. Start Docker Desktop, then re-run this script to start PostgreSQL,\n"
-              "   the victim service and build the sandbox image. Without Docker, sandbox runs are NOT isolated.")
+        print("\n!! Docker is not running. Start Docker Desktop, then re-run with --docker.")
     else:
         step("Starting PostgreSQL + victim service (docker compose)")
         run(["docker", "compose", "up", "-d", "--build"])

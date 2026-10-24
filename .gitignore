@@ -34,3 +34,6 @@ var/
 # Secrets (GitHub App private key etc.)
 secrets/
 *.pem
+
+# Django collectstatic output
+backend/staticfiles/

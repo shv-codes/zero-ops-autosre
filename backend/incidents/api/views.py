@@ -12,7 +12,7 @@ from rest_framework.decorators import api_view
 
 from telemetry import TelemetryUnavailable, get_adapter
 
-from ..models import AuditLog, GuardrailResult, Incident, RunMode, RuntimeConfig, SandboxRun, TelemetrySample
+from ..models import AuditLog, GuardrailResult, Incident, IncidentStatus, RunMode, RuntimeConfig, SandboxRun, TelemetrySample, TimelineEvent
 from ..services import ingest_alert
 from .envelope import fail, ok
 from .serializers import (
@@ -57,6 +57,12 @@ def system_status(request):
     delivery = settings.DELIVERY
     engine = settings.SANDBOX["ENGINE"]
     docker_ok = _docker_available() if engine in ("auto", "docker") else False
+    if engine == "cached":
+        sandbox = {"engine": "cached", "isolated": False, "setting": engine}
+    elif docker_ok:
+        sandbox = {"engine": "docker", "isolated": True, "setting": engine}
+    else:
+        sandbox = {"engine": "subprocess", "isolated": False, "setting": engine}
     monitor = get_monitor()
     try:
         get_adapter().snapshot()
@@ -74,7 +80,7 @@ def system_status(request):
             "auth_mode": ("app" if delivery["GITHUB_APP_ID"] else "token" if delivery["GITHUB_TOKEN"] else "none")
             if delivery["PROVIDER"] == "github" else "local",
         },
-        "sandbox": {"engine": "docker" if docker_ok else "subprocess", "isolated": docker_ok, "setting": engine},
+        "sandbox": sandbox,
         "database": {**db, "engine": settings.TARGET_DB["ENGINE"], "host": settings.TARGET_DB["HOST"]},
         "monitor": {"running": bool(monitor), "last_error": getattr(monitor, "last_error", None),
                     "threshold": config.alert_threshold, "enabled": config.monitor_enabled},
@@ -96,8 +102,10 @@ def list_incidents(request):
     return ok(IncidentSummarySerializer(qs, many=True).data)
 
 
-@api_view(["GET"])
+@api_view(["GET", "DELETE"])
 def get_incident(request, incident_id):
+    if request.method == "DELETE":
+        return _delete_incident(incident_id)
     inc, err = _incident_or_404(incident_id)
     return err or ok(IncidentDetailSerializer(inc).data)
 
@@ -172,6 +180,9 @@ def guardrail_checklist(inc: Incident | None) -> list[dict]:
             if run is None:
                 checks.append({"id": check_id, "name": name, "status": "pending", "passed": None,
                                "details": "No sandbox run yet."})
+            elif run.engine == "cached":
+                checks.append({"id": check_id, "name": "Cached checks", "status": "passed", "passed": True,
+                               "details": "Recorded manage.py check and pytest results. No Docker container."})
             else:
                 lim = run.limits or {}
                 details = (f"Container: network {lim.get('network')}, {lim.get('host_mounts')} host mounts, "
@@ -297,3 +308,34 @@ def decide(request, incident_id):
         return fail("INVALID_DECISION", str(exc), 409)
     AuditLog.objects.create(incident=inc, kind="approval_click", payload={k: body.get(k) for k in ("gate", "decision", "by", "note")})
     return ok({"recorded": True})
+
+
+@api_view(["POST"])
+def force_stop(request, incident_id):
+    """Stop the running agent at its next checkpoint and mark the incident escalated."""
+    from ..runner import request_stop
+
+    inc, err = _incident_or_404(incident_id)
+    if err:
+        return err
+    request_stop(incident_id)
+    if inc.status not in (IncidentStatus.RESOLVED, IncidentStatus.ESCALATED):
+        reason = "Force-stopped."
+        Incident.objects.filter(pk=incident_id).exclude(
+            status__in=[IncidentStatus.RESOLVED, IncidentStatus.ESCALATED]
+        ).update(status=IncidentStatus.ESCALATED, escalation_reason=reason, finished_at=timezone.now(), pending_approval={})
+        TimelineEvent.objects.create(incident_id=incident_id, tag="ALERT", state="ESCALATED", message=f"ESCALATED: {reason}")
+    return ok({"stopped": True, "id": incident_id})
+
+
+def _delete_incident(incident_id):
+    """Remove one incident and its timeline, steps, and audit trail."""
+    from ..runner import request_stop
+
+    inc, err = _incident_or_404(incident_id)
+    if err:
+        return err
+    if inc.status not in (IncidentStatus.RESOLVED, IncidentStatus.ESCALATED):
+        request_stop(incident_id)
+    Incident.objects.filter(pk=incident_id).delete()
+    return ok({"deleted": True, "id": incident_id})

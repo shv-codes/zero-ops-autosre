@@ -2,67 +2,86 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Theme tokens: shadcn/ui "zinc" palette. Light is the default (:root); dark is applied with the
+ * `.dark` class on <html> (see ThemeProvider). Components use semantic classes only
+ * (bg-card, text-muted-foreground, text-success, ...) so both themes work everywhere.
+ */
 @layer base {
   :root {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-
-    --card: 240 10% 4.9%;
-    --card-foreground: 0 0% 98%;
-
-    --popover: 240 10% 4.9%;
-    --popover-foreground: 0 0% 98%;
-
-    --primary: 158 64% 52%;
-    --primary-foreground: 144 100% 98%;
-
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 158 64% 52%;
-
-    --radius: 0.5rem;
-  }
-
-  .light {
     --background: 0 0% 100%;
     --foreground: 240 10% 3.9%;
-
     --card: 0 0% 100%;
     --card-foreground: 240 10% 3.9%;
-
     --popover: 0 0% 100%;
     --popover-foreground: 240 10% 3.9%;
-
-    --primary: 158 64% 40%;
-    --primary-foreground: 0 0% 100%;
-
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
     --secondary: 240 4.8% 95.9%;
     --secondary-foreground: 240 5.9% 10%;
-
     --muted: 240 4.8% 95.9%;
     --muted-foreground: 240 3.8% 46.1%;
-
     --accent: 240 4.8% 95.9%;
     --accent-foreground: 240 5.9% 10%;
-
-    --destructive: 0 84.2% 60.2%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 98%;
-
     --border: 240 5.9% 90%;
     --input: 240 5.9% 90%;
-    --ring: 158 64% 40%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.5rem;
+
+    /* Status colours (text on subtle tinted backgrounds) */
+    --success: 152 76% 30%;
+    --warning: 32 95% 38%;
+    --info: 213 90% 45%;
+    --danger: 0 72% 46%;
+    --violet: 262 60% 50%;
+    --brand: 160 84% 32%;
+
+    /* Charts */
+    --chart-stuck: 0 72% 51%;
+    --chart-active: 38 92% 50%;
+    --chart-idle: 160 84% 39%;
+
+    /* Terminal (stays dark in both themes, like a real console) */
+    --terminal: 240 10% 6%;
+    --terminal-foreground: 240 5% 84%;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 8% 5.5%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 5%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 13%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 45%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+
+    --success: 152 60% 52%;
+    --warning: 38 92% 60%;
+    --info: 213 94% 68%;
+    --danger: 0 84% 66%;
+    --violet: 262 83% 76%;
+    --brand: 160 64% 48%;
+
+    --chart-stuck: 0 72% 58%;
+    --chart-active: 38 92% 55%;
+    --chart-idle: 160 64% 45%;
+
+    --terminal: 240 10% 4%;
+    --terminal-foreground: 240 5% 84%;
   }
 }
 
@@ -70,24 +89,43 @@
   * {
     @apply border-border;
   }
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
   body {
-    @apply bg-background text-foreground font-sans;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
   }
 }
 
-/* Custom scrollbars */
+@layer utilities {
+  /* Tinted status pills / panels that read well in both themes */
+  .tint-success { @apply bg-success/10 text-success border-success/25; }
+  .tint-warning { @apply bg-warning/10 text-warning border-warning/25; }
+  .tint-info { @apply bg-info/10 text-info border-info/25; }
+  .tint-danger { @apply bg-danger/10 text-danger border-danger/25; }
+  .tint-violet { @apply bg-violet/10 text-violet border-violet/25; }
+  .tint-muted { @apply bg-muted text-muted-foreground border-border; }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+}
+
+/* Subtle scrollbars that follow the theme */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(24, 24, 27, 0.4);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(63, 63, 70, 0.6);
+  background: hsl(var(--border));
   border-radius: 9999px;
+  border: 2px solid hsl(var(--background));
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(113, 113, 122, 0.8);
+  background: hsl(var(--muted-foreground) / 0.5);
 }

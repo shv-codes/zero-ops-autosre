@@ -44,14 +44,26 @@ class DjangoRecorder:
         close_old_connections()
         return Incident.objects.filter(pk=self.incident_id)
 
+    def _exists(self) -> bool:
+        return self._incident_qs().exists()
+
     # -- Recorder interface -------------------------------------------------
     def event(self, tag: str, message: str, **data: Any) -> None:
+        if not self._exists():
+            return
         TimelineEvent.objects.create(
             incident_id=self.incident_id, tag=tag, message=message, state=self._status, data=data
         )
         logger.info("[%s] %s %s", self.incident_id, tag, message)
 
     def set_status(self, status: str) -> None:
+        current = self._incident_qs().values_list("status", flat=True).first()
+        if current is None:
+            return
+        # A force-stop (or a finished run) must not be overwritten by a later step.
+        if current in ("RESOLVED", "ESCALATED") and status not in ("RESOLVED", "ESCALATED"):
+            self._status = current
+            return
         previous, self._status = self._status, status
         fields: dict[str, Any] = {"status": status}
         ts_field = _TIMESTAMP_FIELDS.get(status)
@@ -61,16 +73,20 @@ class DjangoRecorder:
         self.audit("transition", {"from": previous, "to": status})
 
     def update(self, **fields: Any) -> None:
-        if fields:
+        if fields and self._exists():
             self._incident_qs().update(**fields)
 
     def agent_step(self, *, task, attempt, step, tool, args, ok, result, thought=""):
+        if not self._exists():
+            return
         AgentStep.objects.create(
             incident_id=self.incident_id, task=task, attempt=attempt, step=step, tool=tool,
             args=args, ok=ok, result=_clip(result, 20_000), thought=_clip(thought, 4_000),
         )
 
     def sandbox_run(self, *, task, attempt, result):
+        if not self._exists():
+            return
         SandboxRun.objects.create(
             incident_id=self.incident_id,
             task=task,
@@ -87,12 +103,16 @@ class DjangoRecorder:
         )
 
     def guardrail(self, *, attempt, check_id, name, passed, details):
+        if not self._exists():
+            return
         GuardrailResult.objects.create(
             incident_id=self.incident_id, attempt=attempt, check_id=check_id,
             name=name, passed=passed, details=details,
         )
 
     def audit(self, kind: str, payload: dict) -> None:
+        if not self._exists():
+            return
         AuditLog.objects.create(incident_id=self.incident_id, kind=kind, payload=payload)
 
     def timeline(self) -> list[dict]:

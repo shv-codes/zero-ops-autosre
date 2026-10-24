@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from django.test import Client
 
@@ -38,3 +40,19 @@ def test_runtime_config_is_a_singleton():
     a = RuntimeConfig.load()
     b = RuntimeConfig.load()
     assert a.pk == b.pk == 1
+
+
+def test_runtime_config_repairs_provider_polluted_by_env_comment():
+    RuntimeConfig.objects.create(pk=1, llm_provider="groq                 # groq | nvidia", mode="live")
+    cfg = RuntimeConfig.load()
+    assert cfg.llm_provider == "groq"
+
+
+def test_env_inline_comment_is_not_part_of_the_value(tmp_path, monkeypatch):
+    from autosre_api.settings import _load_env
+
+    path = tmp_path / ".env"
+    path.write_text("LLM_PROVIDER=groq                 # groq | nvidia\nGROQ_MODEL=openai/gpt-oss-120b\n", encoding="utf-8")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    _load_env(path)
+    assert os.environ["LLM_PROVIDER"] == "groq"

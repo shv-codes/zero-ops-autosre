@@ -1,7 +1,10 @@
 import React, { useState } from "react"
 import { toast } from "sonner"
-import { ShieldQuestion } from "lucide-react"
+import { Check, ShieldQuestion, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { useDecide } from "@/hooks/useAutoSRE"
 import type { Incident } from "@/types/api"
 
@@ -22,21 +25,32 @@ export const ApprovalCard: React.FC<{ incident?: Incident }> = ({ incident }) =>
     )
 
   return (
-    <div className="rounded-xl border border-sky-500/40 bg-sky-500/5 p-4 flex flex-col md:flex-row md:items-center gap-3">
-      <ShieldQuestion className="h-6 w-6 text-sky-300 shrink-0" />
-      <div className="flex-1">
-        <div className="text-[11px] uppercase tracking-wider text-sky-300 font-semibold">Human approval needed · {pending.gate}</div>
-        <div className="text-sm text-zinc-100">{pending.title}</div>
-        <div className="text-[11px] text-zinc-400 font-mono">
-          {Object.entries(pending.details || {}).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`).join(" · ")}
+    <Card role="alert" className="border-info/40 bg-info/[0.04] p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
+        <div className="flex min-w-0 flex-1 gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-info/10 text-info">
+            <ShieldQuestion className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">Approval needed</span>
+              <Badge variant="info" className="capitalize">{pending.gate}</Badge>
+            </div>
+            <p className="mt-1 text-sm">{pending.title}</p>
+            <p className="mt-1 break-words font-mono text-xs text-muted-foreground">
+              {Object.entries(pending.details || {}).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`).join(" · ")}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name (optional)"
+                 aria-label="Your name" className="sm:w-44" />
+          <div className="grid grid-cols-2 gap-2">
+            <Button disabled={decide.isPending} onClick={() => send("approve")}><Check /> Approve</Button>
+            <Button variant="outline" disabled={decide.isPending} onClick={() => send("deny")}><X /> Deny</Button>
+          </div>
         </div>
       </div>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="your name"
-             className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5 text-xs text-zinc-200 w-32" />
-      <div className="flex gap-2">
-        <Button size="sm" variant="sre" disabled={decide.isPending} onClick={() => send("approve")}>Approve</Button>
-        <Button size="sm" variant="outline" disabled={decide.isPending} onClick={() => send("deny")}>Deny</Button>
-      </div>
-    </div>
+    </Card>
   )
 }

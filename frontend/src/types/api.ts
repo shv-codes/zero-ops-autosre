@@ -26,6 +26,23 @@ export interface TimelineEntry {
   state: IncidentStatus
 }
 
+export interface BranchReview {
+  sha: string
+  short_sha: string
+  author: string
+  message: string
+  conflicts: boolean
+  conflict_files: string[]
+  sandbox: {
+    passed: boolean
+    engine: string
+    duration_seconds: number
+    output: string
+    commands: string[]
+  } | null
+  repair_summary: string | null
+}
+
 export interface PullRequestInfo {
   number?: number
   url?: string
@@ -38,6 +55,7 @@ export interface PullRequestInfo {
   rounds?: number
   checks?: string
   title?: string
+  reviews?: BranchReview[]
 }
 
 export interface SuspectInfo {
@@ -207,7 +225,7 @@ export interface SystemStatus {
   mode: RunMode
   llm: { provider: string; model: string; configured: boolean }
   delivery: { provider: "local" | "github"; target: string; configured: boolean }
-  sandbox: { engine: "docker" | "subprocess"; isolated: boolean; setting: string }
+  sandbox: { engine: "docker" | "subprocess" | "cached"; isolated: boolean; setting: string }
   database: { reachable: boolean; error: string | null; engine: string; host: string }
   monitor: { running: boolean; last_error: string | null; threshold: number; enabled: boolean }
   victim: { base_url: string }

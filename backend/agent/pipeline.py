@@ -11,6 +11,7 @@ be unit-tested on its own with fake dependencies (NFR-M3). Any failure routes to
 from __future__ import annotations
 
 import logging
+import re
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from .memory import IncidentMemory, NoMemory, incident_signature
 from .coding.briefing import CodeBriefing
 from .coding.llm import ChatClient
 from .coding.prompts import TaskBrief, ci_brief, conflict_brief, fix_brief, system_prompt
+from .coding.loop import ForceStopped
 from .coding.recordings import recording_for_conflict, recording_for_fix
 from .coding.session import run_coding_task
 from .coding.tools import ToolBox
@@ -79,6 +81,8 @@ class PipelineConfig:
     deliveries_dir: Path = Path("var/deliveries")
     work_dir: Path | None = None
     keep_watching_when_ready: bool = True
+    # Prototype only: after the PR is first ready, push one conflicting commit to the base branch.
+    demo_conflict_after_ready: bool = False
 
 
 @dataclass
@@ -100,6 +104,8 @@ class AgentDeps:
     # Review mode asks a human before impactful steps; autonomous approves immediately (still recorded)
     approvals: ApprovalGate = field(default_factory=AutoApproval)
     memory: IncidentMemory = field(default_factory=NoMemory)
+    # Set by the runner when a person hits Force stop. Checked between steps.
+    should_stop: Callable[[], bool] = field(default_factory=lambda: (lambda: False))
     ctx: dict = field(default_factory=dict)  # runtime objects (workspace, policy) shared between nodes
 
 
@@ -175,7 +181,7 @@ def node_correlate(state: PipelineState, deps: AgentDeps) -> dict:
         raise Escalate(f"could not identify the change that caused this: {exc}") from exc
     rec.update(suspect=suspect)
     c, loc = suspect["commit"], suspect["location"]
-    rec.event("CORR", f"Suspect commit {c['short_sha']} by {c['author']}: \"{c['message']}\" "
+    rec.event("CORR", f"Suspect commit \"{c['message']}\" by {c['author']} "
                       f"(confidence {suspect['confidence']}).")
     if loc.get("start_line"):
         rec.event("CORR", f"Leaking code: {loc['file']} lines {loc['start_line']}-{loc['end_line']}"
@@ -194,13 +200,26 @@ def node_correlate(state: PipelineState, deps: AgentDeps) -> dict:
     return {"suspect": suspect, "related": related}
 
 
+def _fix_branch_name(function: str, origin: str) -> str:
+    """A readable branch, e.g. autosre/fix-user-activity-report. Never the incident id."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (function or "connection-leak").lower()).strip("-") or "connection-leak"
+    base = f"autosre/fix-{slug}"
+    if not Path(origin).joinpath("HEAD").exists():
+        return base
+    name, n = base, 2
+    while git("rev-parse", "--verify", "--quiet", f"refs/heads/{name}", cwd=origin, check=False).strip():
+        name = f"{base}-{n}"
+        n += 1
+    return name
+
+
 def node_fix(state: PipelineState, deps: AgentDeps) -> dict:
     rec, cfg = deps.recorder, deps.config
     rec.set_status("PATCHING")
     suspect = state["suspect"]
-    branch = f"autosre/fix-{state['incident_id'].lower()}"
     try:
         source, env = deps.provider.clone_source()
+        branch = _fix_branch_name((suspect.get("location") or {}).get("function") or "", source)
         ws = Workspace.create(source, cfg.base_branch, branch, parent_dir=cfg.work_dir, git_env=env,
                               author=deps.provider.commit_identity())
     except (GitError, DeliveryError) as exc:
@@ -216,7 +235,9 @@ def node_fix(state: PipelineState, deps: AgentDeps) -> dict:
     rec.update(project_profile=profile.as_dict(), branch=branch, sandbox_isolated=bool(deps.sandbox.isolated))
     rec.event("PATCH", f"Workspace ready: temporary clone on branch {branch} ({profile.language} project, "
                        f"build/test profile from {'.autosre.yml' if profile.source == 'file' else 'auto-detection'}).")
-    if not deps.sandbox.isolated:
+    if getattr(deps.sandbox, "engine", "") == "cached":
+        rec.event("TEST", "Using cached checks (recorded manage.py check and pytest). No Docker.")
+    elif not deps.sandbox.isolated:
         rec.event("TEST", "WARNING: Docker is unavailable - sandbox runs are NOT ISOLATED (subprocess fallback).")
 
     briefing = CodeBriefing(ws).render(suspect.get("location", {}).get("file") or suspect["primary_file"])
@@ -237,10 +258,16 @@ def node_fix(state: PipelineState, deps: AgentDeps) -> dict:
         return ToolBox(ws, profile, policy, deps.sandbox, rec, "fix", cfg.max_attempts, True,
                        on_attempt=lambda n: rec.update(attempt=n))
 
+    try:  # recorded edits are derived from the code as actually checked out
+        suspect_source = ws.read_file(suspect.get("location", {}).get("file") or suspect["primary_file"])
+    except (FileNotFoundError, ValueError):
+        suspect_source = None
     result, brain = run_coding_task(
-        mode=deps.mode, live_client_factory=deps.live_client_factory, recording=recording_for_fix(suspect),
+        mode=deps.mode, live_client_factory=deps.live_client_factory,
+        recording=recording_for_fix(suspect, suspect_source),
         make_toolbox=make_toolbox, restart=ws.reset_hard, recorder=rec,
         system_prompt=system_prompt(profile, policy, cfg.max_attempts), task_prompt=task, max_steps=cfg.max_steps,
+        should_stop=deps.should_stop,
     )
     rec.update(llm=brain.as_dict())
     if not result.success:
@@ -284,7 +311,7 @@ def node_deliver(state: PipelineState, deps: AgentDeps) -> dict:
         saved = save_local_bundle(cfg.deliveries_dir, state["incident_id"], ws.diff(ws.base_sha), body)
         raise Escalate(f"delivery to {deps.provider.name} failed ({exc}); patch and post-mortem saved to {saved}") from exc
 
-    pr_info = {**pr.__dict__, "provider": deps.provider.name, "rounds": 0, "title": title}
+    pr_info = {**pr.__dict__, "provider": deps.provider.name, "rounds": 0, "title": title, "reviews": []}
     rec.update(pull_request=pr_info, pr_opened_at=_now(), postmortem=body)
     rec.set_status("PR_CREATED")
     rec.event("PR", f"Draft pull request #{pr.number} opened: {pr.url} (branch {ws.branch}, labels "
@@ -292,6 +319,96 @@ def node_deliver(state: PipelineState, deps: AgentDeps) -> dict:
     ws.cleanup()
     deps.ctx.pop("workspace", None)
     return {"pr": pr_info}
+
+
+def _remember_pr(state: PipelineState, deps: AgentDeps, extra: dict) -> dict:
+    pr = {**state.get("pr", {}), **extra}
+    state["pr"] = pr
+    deps.recorder.update(pull_request=pr)
+    return pr
+
+
+def _origin_path(provider):
+    origin = getattr(provider, "origin", None)
+    return origin if isinstance(origin, Path) and (origin / "HEAD").exists() else None
+
+
+def _note_new_commit(state: PipelineState, deps: AgentDeps, status: PRStatus) -> None:
+    """Record a newly pushed base commit and whether it conflicts with the pull request."""
+    origin = _origin_path(deps.provider)
+    if origin is None:
+        return
+    try:
+        sha = git("rev-parse", status.base_branch, cwd=origin).strip()
+    except GitError:
+        return
+    if deps.ctx.get("seen_base_sha") in (None, sha):
+        deps.ctx["seen_base_sha"] = sha
+        return
+    deps.ctx["seen_base_sha"] = sha
+    try:
+        raw = git("log", "-1", "--format=%an%x1f%s", sha, cwd=origin)
+    except GitError:
+        raw = "unknown\x1f"
+    author, _, message = raw.partition("\x1f")
+    files = list(getattr(status, "conflict_files", []) or [])
+    review = {
+        "sha": sha, "short_sha": sha[:7], "author": author.strip() or "unknown", "message": message.strip(),
+        "conflicts": bool(status.conflicts), "conflict_files": files,
+        "sandbox": None, "repair_summary": None,
+    }
+    reviews = list(state["pr"].get("reviews") or [])
+    reviews.append(review)
+    _remember_pr(state, deps, {"reviews": reviews, "conflicts": bool(status.conflicts)})
+    where = ", ".join(files) if files else ("yes" if status.conflicts else "none")
+    deps.recorder.event(
+        "LOOP",
+        f"New commit \"{review['message']}\" by {review['author']} on {status.base_branch}. Merge conflicts: {where}.",
+    )
+
+
+def _attach_repair(state: PipelineState, deps: AgentDeps, summary: str, sandbox: dict | None) -> None:
+    reviews = list(state["pr"].get("reviews") or [])
+    if not reviews:
+        return
+    last = dict(reviews[-1])
+    last["repair_summary"] = summary
+    if sandbox:
+        last["sandbox"] = {
+            "passed": bool(sandbox.get("passed")),
+            "engine": sandbox.get("engine"),
+            "duration_seconds": sandbox.get("duration_seconds"),
+            "output": (sandbox.get("output") or "")[-4000:],
+            "commands": [s.get("command") for s in sandbox.get("steps") or []],
+        }
+    reviews[-1] = last
+    _remember_pr(state, deps, {"reviews": reviews})
+    if sandbox:
+        outcome = "PASSED" if sandbox.get("passed") else "FAILED"
+        deps.recorder.event(
+            "TEST",
+            f"Full check on the branch: {outcome} ({sandbox.get('engine')}, {sandbox.get('duration_seconds')}s).",
+        )
+
+
+def _maybe_demo_push(deps: AgentDeps) -> bool:
+    """Push Dana's conflicting commit once, the first time the prototype PR is ready."""
+    cfg = deps.config
+    if not cfg.demo_conflict_after_ready or deps.ctx.get("demo_conflict_pushed"):
+        return False
+    from demo.teammate import MESSAGE as teammate_message, push_teammate_change
+
+    deps.ctx["demo_conflict_pushed"] = True
+    try:
+        push_teammate_change(deps.provider)
+    except DeliveryError as exc:
+        deps.recorder.event("LOOP", f"Teammate push skipped: {exc}")
+        return False
+    deps.recorder.event(
+        "LOOP",
+        f"A teammate pushed \"{teammate_message}\" to {cfg.base_branch}. Watching for merge conflicts.",
+    )
+    return True
 
 
 def node_watch_pr(state: PipelineState, deps: AgentDeps) -> dict:
@@ -304,6 +421,8 @@ def node_watch_pr(state: PipelineState, deps: AgentDeps) -> dict:
                       f"(max {cfg.pr_max_rounds} repair rounds).")
 
     while time.monotonic() < deadline:
+        if deps.should_stop():
+            raise Escalate("Force-stopped.")
         try:
             status = provider.get_pr(number)
             errors = 0
@@ -315,15 +434,17 @@ def node_watch_pr(state: PipelineState, deps: AgentDeps) -> dict:
             continue
 
         if status.state == "merged":
-            rec.update(pull_request={**state["pr"], **status.__dict__, "rounds": rounds})
+            _remember_pr(state, deps, {**status.__dict__, "rounds": rounds})
             rec.set_status("RESOLVED")
             rec.event("PR", f"PR #{number} was merged by a human. Incident resolved.")
-            return {"outcome": "merged"}
+            return {"outcome": "merged", "pr": state["pr"]}
         if status.state == "closed":
             raise Escalate(f"PR #{number} was closed without merging")
         if status.mergeable is None:
             deps.sleep(min(cfg.pr_poll_seconds, 5))
             continue
+
+        _note_new_commit(state, deps, status)
 
         if status.conflicts:
             rounds += 1
@@ -332,7 +453,8 @@ def node_watch_pr(state: PipelineState, deps: AgentDeps) -> dict:
             ready = False
             rec.set_status("UPDATING_PR")
             rec.event("LOOP", f"Round {rounds}: PR #{number} conflicts with the latest {cfg.base_branch}. Repairing...")
-            _repair(state, deps, status, "resolve_conflict", rounds)
+            repaired = _repair(state, deps, status, "resolve_conflict", rounds)
+            _attach_repair(state, deps, repaired["summary"], repaired.get("sandbox"))
             rec.set_status("PR_CREATED")
             continue
 
@@ -344,7 +466,8 @@ def node_watch_pr(state: PipelineState, deps: AgentDeps) -> dict:
             ready = False
             rec.set_status("UPDATING_PR")
             rec.event("LOOP", f"Round {rounds}: CI failed on PR #{number}:\n{checks.failure_text()[:600]}")
-            _repair(state, deps, status, "fix_ci", rounds, ci_failures=checks.failure_text())
+            repaired = _repair(state, deps, status, "fix_ci", rounds, ci_failures=checks.failure_text())
+            _attach_repair(state, deps, repaired["summary"], repaired.get("sandbox"))
             rec.set_status("PR_CREATED")
             continue
         if checks.state == "pending":
@@ -354,24 +477,26 @@ def node_watch_pr(state: PipelineState, deps: AgentDeps) -> dict:
         if not ready:
             provider.mark_ready(number)
             ready = True
-            rec.update(pull_request={**state["pr"], **status.__dict__, "draft": False, "rounds": rounds,
-                                     "checks": checks.state})
+            _remember_pr(state, deps, {**status.__dict__, "draft": False, "rounds": rounds, "checks": checks.state})
             rec.set_status("READY_TO_MERGE")
             ci = "CI checks green" if checks.state == "success" else "no external CI configured; sandbox-verified"
             rec.event("PR", f"PR #{number} is READY TO MERGE ({ci}, no conflicts, {rounds} repair round(s)). "
                             f"Waiting for a human to merge.")
+            if _maybe_demo_push(deps):
+                deps.sleep(cfg.pr_poll_seconds)
+                continue
             if not cfg.keep_watching_when_ready:
-                return {"outcome": "ready"}
+                return {"outcome": "ready", "pr": state["pr"]}
         deps.sleep(cfg.pr_poll_seconds)
 
     if ready:
         rec.event("LOOP", f"Stopped watching PR #{number} after {cfg.pr_watch_timeout / 60:.0f} min; it remains ready to merge.")
-        return {"outcome": "ready"}
+        return {"outcome": "ready", "pr": state["pr"]}
     raise Escalate(f"PR #{number} did not become ready to merge within {cfg.pr_watch_timeout / 60:.0f} minutes")
 
 
 def _repair(state: PipelineState, deps: AgentDeps, status: PRStatus, task: str, round_no: int,
-            ci_failures: str = "") -> None:
+            ci_failures: str = "") -> dict:
     rec, cfg = deps.recorder, deps.config
     source, env = deps.provider.clone_source()
     ws = Workspace.create(source, cfg.base_branch, status.head_branch, parent_dir=cfg.work_dir, git_env=env,
@@ -388,7 +513,7 @@ def _repair(state: PipelineState, deps: AgentDeps, status: PRStatus, task: str, 
             if not conflicted:
                 deps.provider.push(ws)
                 rec.event("LOOP", f"Latest {cfg.base_branch} merged cleanly into the fix branch; pushed.")
-                return
+                return {"summary": f"Latest {cfg.base_branch} merged cleanly into the fix branch.", "sandbox": None}
             outside = [p for p in conflicted if p not in policy.allowed_files]
             if outside:
                 raise Escalate(f"merge conflict in files AutoSRE may not edit: {', '.join(outside)}")
@@ -415,21 +540,24 @@ def _repair(state: PipelineState, deps: AgentDeps, status: PRStatus, task: str, 
             mode=deps.mode, live_client_factory=deps.live_client_factory, recording=recording,
             make_toolbox=make_toolbox, restart=restart, recorder=rec,
             system_prompt=system_prompt(profile, policy, cfg.max_attempts), task_prompt=prompt,
-            max_steps=cfg.max_steps,
+            max_steps=cfg.max_steps, should_stop=deps.should_stop,
         )
         if not result.success:
             raise Escalate(f"could not {task.replace('_', ' ')} on PR #{status.number} ({result.reason})")
+        subject = result.summary.split(". ")[0][:72].rstrip(".")
         if ws.merging():
-            ws.complete_merge()
+            ws.complete_merge(f"merge: {subject}\n\n{result.summary}")
         else:
-            ws.commit_all(f"fix: {task.replace('_', ' ')} for {state['incident_id']}\n\n{result.summary}")
+            ws.commit_all(f"fix: {subject}\n\n{result.summary}")
         deps.provider.push(ws)
         diff = ws.diff(f"origin/{cfg.base_branch}")
-        rec.update(unified_diff=diff, pull_request={**state["pr"], "rounds": round_no})
+        rec.update(unified_diff=diff)
+        _remember_pr(state, deps, {"rounds": round_no})
         what = "merge conflict" if task == "resolve_conflict" else "CI failure"
         deps.provider.comment(status.number, f"🤖 AutoSRE repaired a {what} (round {round_no}): {result.summary}\n\n"
                                              f"Re-verified in the sandbox ({deps.sandbox.engine}).")
         rec.event("LOOP", f"Round {round_no}: {what} repaired and pushed - {result.summary[:200]}")
+        return {"summary": result.summary, "sandbox": result.last_sandbox}
     finally:
         ws.cleanup()
 
@@ -457,6 +585,8 @@ def _ask(deps: AgentDeps, req: ApprovalRequest):
     if deps.approvals.mode == "review":
         rec.event("ALERT", f"Waiting for human approval: {req.title}")
     decision = deps.approvals.request(req)
+    if deps.should_stop():
+        raise Escalate("Force-stopped.")
     deps.ctx.setdefault("approvals", []).append(
         {"gate": req.gate, "approved": decision.approved, "by": decision.by, "mode": deps.approvals.mode})
     rec.audit("approval", {"gate": req.gate, "title": req.title, "details": req.details, "mode": deps.approvals.mode,
@@ -550,6 +680,7 @@ def ai_card(state: PipelineState, deps: AgentDeps) -> dict:
         },
         "verification": {
             "sandbox_isolated": bool(getattr(deps.sandbox, "isolated", False)),
+            "sandbox_engine": getattr(deps.sandbox, "engine", ""),
             "regression_test_fails_on_old_code": (fix.get("sandbox") or {}).get("reproduced"),
             "attempts": fix.get("attempts"),
         },
@@ -592,8 +723,12 @@ def build_graph(deps: AgentDeps):
 
     def wrap(name, fn):
         def run(state: PipelineState) -> dict:
+            if deps.should_stop():
+                return {"error": "Force-stopped."}
             try:
                 return fn(state, deps) or {}
+            except ForceStopped:
+                return {"error": "Force-stopped."}
             except Escalate as exc:
                 return {"error": str(exc)}
             except Exception as exc:  # NFR-R2: never crash silently

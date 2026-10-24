@@ -45,9 +45,9 @@ export const STATUS_TONE: Record<IncidentStatus, "active" | "done" | "failed" | 
 }
 
 export const TONE_CLASSES = {
-  active: "bg-amber-500/10 text-amber-300 border-amber-500/30",
-  done: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-  failed: "bg-red-500/10 text-red-300 border-red-500/30",
-  waiting: "bg-sky-500/10 text-sky-300 border-sky-500/30",
-  pending: "bg-zinc-800/60 text-zinc-500 border-zinc-700/60",
+  active: "tint-warning",
+  done: "tint-success",
+  failed: "tint-danger",
+  waiting: "tint-info",
+  pending: "tint-muted",
 }

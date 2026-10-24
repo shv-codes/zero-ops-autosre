@@ -4,6 +4,7 @@ AutoSRE settings.
 Everything that differs between machines (secrets, hosts, paths, modes) comes from
 environment variables or the repo-level `.env` file. Nothing secret lives in code (NFR-S1).
 """
+import os
 from pathlib import Path
 
 import environ
@@ -11,9 +12,33 @@ import environ
 BASE_DIR = Path(__file__).resolve().parent.parent  # backend/
 REPO_ROOT = BASE_DIR.parent
 
+
+def _load_env(path: Path) -> None:
+    """Load `.env`. django-environ keeps an unquoted ` # comment` as part of the value."""
+    if not path.exists():
+        return
+    environ.Env.read_env(path)
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key, raw_value = key.strip(), raw_value.strip()
+        if not key or not raw_value or raw_value[0] in "\"'":
+            continue
+        if " #" not in raw_value:
+            continue
+        current = os.environ.get(key)
+        if current is not None and current.strip() == raw_value:
+            os.environ[key] = raw_value.split(" #", 1)[0].rstrip()
+
+
 env = environ.Env()
-if (REPO_ROOT / ".env").exists():
-    environ.Env.read_env(REPO_ROOT / ".env")
+_load_env(REPO_ROOT / ".env")
 
 VAR_DIR = Path(env("AUTOSRE_VAR_DIR", default=str(REPO_ROOT / "var"))).resolve()
 VAR_DIR.mkdir(parents=True, exist_ok=True)
@@ -21,6 +46,9 @@ VAR_DIR.mkdir(parents=True, exist_ok=True)
 SECRET_KEY = env("DJANGO_SECRET_KEY", default="autosre-dev-only-not-secret")
 DEBUG = env.bool("DEBUG", default=True)
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
+# Render sets this to the service's public hostname.
+if env("RENDER_EXTERNAL_HOSTNAME", default=""):
+    ALLOWED_HOSTS.append(env("RENDER_EXTERNAL_HOSTNAME"))
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -37,6 +65,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -84,6 +113,11 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Behind a hosting proxy (Render) the original scheme arrives in this header.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
@@ -98,6 +132,8 @@ CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS",
     default=["http://localhost:5173", "http://127.0.0.1:5173"],
 )
+# e.g. ^https://zero-ops-autosre(-[a-z0-9-]+)?\.vercel\.app$ to also allow Vercel preview URLs
+CORS_ALLOWED_ORIGIN_REGEXES = env.list("CORS_ALLOWED_ORIGIN_REGEXES", default=[])
 
 LOGGING = {
     "version": 1,
@@ -202,8 +238,8 @@ LLM = {
 FRONTEND_URL = env("FRONTEND_URL", default="http://127.0.0.1:5173")
 
 SANDBOX = {
-    # auto = Docker when available, otherwise the clearly-labeled NOT ISOLATED subprocess runner
-    "ENGINE": env("SANDBOX_ENGINE", default="auto"),
+    # cached = recorded check/test results (prototype, no Docker). auto = Docker if it is running.
+    "ENGINE": env("SANDBOX_ENGINE", default="cached"),
     "TIMEOUT_SECONDS": env.int("SANDBOX_TIMEOUT_SECONDS", default=120),
     "MEMORY": env("SANDBOX_MEMORY", default="512m"),
     "CPUS": env.float("SANDBOX_CPUS", default=1.0),

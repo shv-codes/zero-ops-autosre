@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
@@ -25,6 +27,14 @@ class LLMUnavailable(Exception):
 
 class LLMQuotaExhausted(LLMUnavailable):
     """The model's quota is used up for a long time (e.g. a daily token cap); retrying now is pointless."""
+
+
+class LLMRateLimited(LLMUnavailable):
+    """Groq returned 429 for a short window. Another model on this key may still have budget."""
+
+    def __init__(self, message: str, retry_after: float = 1.0):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -117,11 +127,24 @@ class OpenAICompatClient:
                 if hinted > self.MAX_RETRY_WAIT_SECONDS or "per day" in str(exc).lower():
                     raise LLMQuotaExhausted(
                         f"{self.provider}/{self.model} quota exhausted (retry in ~{hinted / 60:.0f} min)") from exc
+                # A Groq 429 is per model. Retrying this model usually 429s again;
+                # the fallback chain switches to the next model immediately.
+                if self.provider == "groq":
+                    raise LLMRateLimited(
+                        f"{self.provider}/{self.model} returned 429 (retry hint {hinted:.0f}s)",
+                        retry_after=min(hinted, self.MAX_RETRY_WAIT_SECONDS),
+                    ) from exc
                 if attempt == self.settings.rate_limit_retries:
                     raise LLMUnavailable(f"{self.provider} rate limit persisted: {exc}") from exc
                 wait = self._retry_after(exc)
                 logger.warning("%s rate limited; retrying in %.0fs", self.provider, wait)
                 self._sleep(wait)
+            except openai.APIStatusError as exc:
+                recovered = _tool_calls_from_rejected_generation(exc)
+                if recovered:
+                    logger.warning("Groq returned 400 for malformed tool JSON; recovered %s", recovered[0].name)
+                    return AssistantTurn(content="", tool_calls=recovered)
+                raise LLMUnavailable(f"{self.provider} API error: {exc}") from exc
             except openai.APIError as exc:
                 raise LLMUnavailable(f"{self.provider} API error: {exc}") from exc
         usage = getattr(resp, "usage", None)
@@ -159,18 +182,29 @@ class OpenAICompatClient:
         return min(wait, self.MAX_RETRY_WAIT_SECONDS) if cap else wait
 
 
+def _jittered_wait(hinted: float, attempt: int, rng: random.Random) -> float:
+    """Honor Groq's retry hint, then add a random spread so retries don't line up."""
+    base = min(max(float(hinted or 1.0), 1.0), OpenAICompatClient.MAX_RETRY_WAIT_SECONDS)
+    spread = min(1.0, base * 0.25)
+    expo = min(8.0, 0.5 * (2 ** attempt))
+    return min(OpenAICompatClient.MAX_RETRY_WAIT_SECONDS, base + rng.uniform(0, spread) + rng.uniform(0, expo))
+
+
 class FallbackChatClient:
     """
-    Tries models in order. When one runs out of quota (e.g. a free-tier daily cap), it switches
-    to the next for the rest of the task. Each model on Groq has its own quota.
+    Tries models in order. A Groq 429 switches to the next model immediately — each model
+    has its own rate limit. The last model retries with a randomized delay, then gives up.
     """
 
-    def __init__(self, clients: list, on_switch: Callable[[str, str, str], None] | None = None):
+    def __init__(self, clients: list, on_switch: Callable[[str, str, str], None] | None = None,
+                 sleep: Callable[[float], None] | None = None, rng: random.Random | None = None):
         if not clients:
             raise LLMUnavailable("no LLM models configured")
         self._clients = list(clients)
         self._i = 0
         self.on_switch = on_switch
+        self._sleep = sleep or time.sleep
+        self._rng = rng or random.Random()
 
     @property
     def current(self):
@@ -198,17 +232,122 @@ class FallbackChatClient:
         return total
 
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantTurn:
+        last_retries = 0
         while True:
             try:
                 return self.current.complete(messages, tools)
             except LLMQuotaExhausted as exc:
-                if self._i + 1 >= len(self._clients):
-                    raise
-                old = self.current.model
-                self._i += 1
-                logger.warning("%s; switching to %s", exc, self.current.model)
-                if self.on_switch:
-                    self.on_switch(old, self.current.model, str(exc))
+                self._switch(exc)
+                last_retries = 0
+            except LLMRateLimited as exc:
+                if self._i + 1 < len(self._clients):
+                    self._switch(exc)
+                    last_retries = 0
+                    continue
+                if last_retries >= self.current.settings.rate_limit_retries:
+                    raise LLMUnavailable(
+                        f"{self.current.provider}/{self.current.model} rate limit persisted: {exc}") from exc
+                wait = _jittered_wait(exc.retry_after, last_retries, self._rng)
+                logger.warning("%s/%s returned 429; retrying in %.1fs",
+                               self.current.provider, self.current.model, wait)
+                self._sleep(wait)
+                last_retries += 1
+
+    def _switch(self, exc: Exception) -> None:
+        if self._i + 1 >= len(self._clients):
+            raise exc
+        old = self.current.model
+        self._i += 1
+        logger.warning("%s; switching immediately to %s", exc, self.current.model)
+        if self.on_switch:
+            self.on_switch(old, self.current.model, str(exc))
+
+
+_NUMBER_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100,
+}
+_ARG_ALIASES = {"line_start": "start_line", "start": "start_line", "end": "end_line"}
+
+
+def _repair_loose_json(text: str) -> str:
+    """Quote bare words and turn number-words into digits so `end_line: fifty` parses."""
+    def repl(match: re.Match) -> str:
+        word = match.group(1)
+        low = word.lower()
+        if low in ("true", "false", "null"):
+            return match.group(0)
+        if low in _NUMBER_WORDS:
+            return f": {_NUMBER_WORDS[low]}"
+        return f': "{word}"'
+    return re.sub(r":\s*([A-Za-z_][A-Za-z0-9_]*)\b", repl, text)
+
+
+def _loads_object(text: str) -> dict | None:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    for candidate in (text, _repair_loose_json(text)):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _normalize_tool_args(args: dict) -> dict:
+    out = dict(args)
+    for alias, canonical in _ARG_ALIASES.items():
+        if alias in out and canonical not in out:
+            out[canonical] = out.pop(alias)
+    return out
+
+
+def _tool_call_from_payload(data: dict) -> list[ToolCall]:
+    name = data.get("name")
+    if not isinstance(name, str) or not name:
+        return []
+    args = data.get("arguments", data.get("parameters", {}))
+    if isinstance(args, str):
+        args = _loads_object(args) or {}
+    if not isinstance(args, dict):
+        return []
+    return [ToolCall(name=name, arguments=_normalize_tool_args(args))]
+
+
+def _failed_generation_text(exc) -> str | None:
+    body = getattr(exc, "body", None)
+    if isinstance(body, str):
+        body = _loads_object(body)
+    err = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else body
+    if isinstance(err, dict):
+        code = str(err.get("code") or "")
+        message = str(err.get("message") or "")
+        if code == "tool_use_failed" or "tool call arguments" in message.lower():
+            gen = err.get("failed_generation")
+            if isinstance(gen, str) and gen.strip():
+                return gen
+            if isinstance(gen, dict):
+                return json.dumps(gen)
+    text = str(exc)
+    if "tool_use_failed" not in text and "Failed to parse tool call arguments" not in text:
+        return None
+    match = re.search(r"failed_generation': '(.*)'\}}", text)
+    return match.group(1) if match else None
+
+
+def _tool_calls_from_rejected_generation(exc) -> list[ToolCall]:
+    raw = _failed_generation_text(exc)
+    if not raw:
+        return []
+    data = _loads_object(raw)
+    if not data:
+        return []
+    return _tool_call_from_payload(data)
 
 
 def _tool_calls_from_text(text: str) -> list[ToolCall]:

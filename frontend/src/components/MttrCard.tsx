@@ -1,10 +1,19 @@
 import React, { useEffect, useState } from "react"
 import { Timer } from "lucide-react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
+import { PanelHeader } from "@/components/Panel"
 import { duration, secondsBetween } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import type { Incident } from "@/types/api"
 
 const MANUAL_MTTR_SECONDS = 45 * 60 // typical manual response, for comparison (AO-1)
+
+const Stat: React.FC<{ label: string; value: string; tone?: string; big?: boolean }> = ({ label, value, tone, big }) => (
+  <div>
+    <div className="text-xs text-muted-foreground">{label}</div>
+    <div className={cn("mt-0.5 font-semibold tabular-nums tracking-tight", big ? "text-2xl" : "text-lg", tone)}>{value}</div>
+  </div>
+)
 
 export const MttrCard: React.FC<{ incident?: Incident }> = ({ incident }) => {
   const [, tick] = useState(0)
@@ -18,34 +27,28 @@ export const MttrCard: React.FC<{ incident?: Incident }> = ({ incident }) => {
   const toFix = incident ? (incident.mttr_seconds ?? secondsBetween(incident.created_at, null)) : null
   const toMitigate = incident?.time_to_mitigate_seconds ?? null
   const pct = toFix ? Math.min(100, (toFix / MANUAL_MTTR_SECONDS) * 100) : 0
+  const speedup = toFix ? Math.max(1, Math.round(MANUAL_MTTR_SECONDS / Math.max(toFix, 1))) : null
 
   return (
-    <Card className="border-zinc-800 bg-zinc-950">
-      <CardHeader className="py-2.5 px-4 border-b border-zinc-800/80 bg-zinc-900/50 space-y-0 flex flex-row items-center gap-2">
-        <Timer className="h-4 w-4 text-emerald-400" />
-        <CardTitle className="text-xs uppercase tracking-wider font-bold text-zinc-200">Time to recovery</CardTitle>
-      </CardHeader>
-      <CardContent className="p-4 space-y-3">
+    <Card>
+      <PanelHeader icon={Timer} title="Time to recovery" description={running ? "Running" : "Alert to verified fix"} />
+      <CardContent className="space-y-4 p-4">
         {!incident ? (
-          <p className="text-xs text-zinc-500">Starts when an alert arrives.</p>
+          <p className="text-sm text-muted-foreground">Starts when an alert arrives.</p>
         ) : (
           <>
-            <div>
-              <div className="text-[11px] text-zinc-400">Service restored (stop-the-bleeding)</div>
-              <div className="text-xl font-mono font-bold text-orange-300">{toMitigate !== null ? duration(toMitigate) : running ? "…" : "—"}</div>
+            <div className="grid grid-cols-2 gap-4">
+              <Stat label="Service restored" value={toMitigate !== null ? duration(toMitigate) : running ? "…" : "—"} />
+              <Stat label="Fix ready to merge" value={duration(toFix)} big
+                    tone={incident.status === "ESCALATED" ? "text-danger" : undefined} />
             </div>
-            <div>
-              <div className="text-[11px] text-zinc-400">Alert → verified fix ready to merge {running && "(running)"}</div>
-              <div className={`text-2xl font-mono font-bold ${incident.status === "ESCALATED" ? "text-red-400" : "text-emerald-400"}`}>
-                {duration(toFix)}
+            <div className="space-y-1.5">
+              <div className="flex justify-between gap-2 text-xs text-muted-foreground">
+                <span>vs. typical manual response (≈45 min)</span>
+                {speedup && incident.status !== "ESCALATED" && <span className="shrink-0 font-medium text-success">{speedup}× faster</span>}
               </div>
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-zinc-500 mb-1">
-                <span>AutoSRE</span><span>typical manual ≈ 45 min</span>
-              </div>
-              <div className="h-2 rounded-full bg-zinc-800 overflow-hidden">
-                <div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.max(pct, 1)}%` }} />
+              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full bg-success transition-all" style={{ width: `${Math.max(pct, 1)}%` }} />
               </div>
             </div>
           </>

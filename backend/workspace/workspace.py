@@ -172,9 +172,12 @@ class Workspace:
     def merging(self) -> bool:
         return (self.root / ".git" / "MERGE_HEAD").exists()
 
-    def complete_merge(self) -> str:
+    def complete_merge(self, message: str | None = None) -> str:
         git("add", "--all", cwd=self.root)
-        git("commit", "--quiet", "--no-edit", cwd=self.root)
+        if message:
+            git("commit", "--quiet", "-m", message, cwd=self.root)
+        else:
+            git("commit", "--quiet", "--no-edit", cwd=self.root)
         return self.head_sha()
 
     def abort_merge(self) -> None:

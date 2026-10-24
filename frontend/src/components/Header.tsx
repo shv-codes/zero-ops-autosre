@@ -1,7 +1,17 @@
 import React, { useEffect, useState } from "react"
-import { AlertTriangle, Bot, Box, Database, GitPullRequest, Shield, Sliders } from "lucide-react"
+import { Activity, AlertTriangle, Bot, Box, Database, GitPullRequest, ShieldCheck, SlidersHorizontal } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { ModeToggle } from "@/components/ModeToggle"
+import { cn } from "@/lib/utils"
 import type { Incident, SystemStatus } from "@/types/api"
 
 interface HeaderProps {
@@ -11,26 +21,47 @@ interface HeaderProps {
   onOpenControls: () => void
 }
 
-const Chip: React.FC<{ ok: boolean | null; icon: React.ElementType; label: string; title?: string }> = ({ ok, icon: Icon, label, title }) => (
-  <div
-    title={title}
-    className={`hidden md:flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-md border ${
-      ok === null ? "border-zinc-800 text-zinc-400" : ok ? "border-emerald-500/30 text-emerald-300 bg-emerald-500/5" : "border-amber-500/30 text-amber-300 bg-amber-500/5"
-    }`}
-  >
-    <Icon className="h-3 w-3" />
-    {label}
-  </div>
+interface StatusItem {
+  key: string
+  ok: boolean | null
+  icon: React.ElementType
+  label: string
+  detail?: string
+}
+
+function statusItems(system: SystemStatus): StatusItem[] {
+  const cachedChecks = system.sandbox.engine === "cached"
+  return [
+    { key: "db", ok: system.database.reachable, icon: Database,
+      label: system.database.reachable ? "Database" : "Database unreachable",
+      detail: system.database.error || `${system.database.engine} @ ${system.database.host}` },
+    { key: "sandbox", ok: cachedChecks ? true : system.sandbox.isolated, icon: Box,
+      label: cachedChecks ? "Cached checks" : system.sandbox.isolated ? "Docker sandbox" : "Sandbox not isolated",
+      detail: cachedChecks ? "Replaying recorded check results" : `Engine: ${system.sandbox.engine}` },
+    { key: "llm", ok: system.mode !== "live" || system.llm.configured, icon: Bot,
+      label: system.mode === "live" ? `${system.llm.provider}${system.llm.configured ? "" : " (no key)"}` : "Cached brain",
+      detail: system.llm.model },
+    { key: "delivery", ok: system.delivery.configured, icon: GitPullRequest,
+      label: system.delivery.provider === "github" ? "GitHub" : "Local origin", detail: system.delivery.target },
+  ]
+}
+
+const Dot: React.FC<{ ok: boolean | null }> = ({ ok }) => (
+  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", ok === null ? "bg-muted-foreground" : ok ? "bg-success" : "bg-warning")} />
 )
 
 export const Header: React.FC<HeaderProps> = ({ system, backendError, incident, onOpenControls }) => {
   // FR-9.3: always say when the run is not fully live or not fully isolated.
+  const cachedChecks = system?.sandbox.engine === "cached"
   const banners: string[] = []
   if (backendError) banners.push(backendError)
-  if (incident?.mode === "replay") banners.push(`REPLAY: ${incident.id} is a playback of a recorded run — nothing is being executed.`)
-  else if (incident?.llm?.fallback_used) banners.push(`LLM unreachable (${incident.llm.fallback_reason}) — this incident used CACHED recorded decisions.`)
-  else if (system?.mode === "cached") banners.push("CACHED mode: the agent replays recorded decisions; files, guardrails and sandbox still run for real.")
-  if (system && !system.sandbox.isolated) banners.push("Docker is not running — sandbox runs are NOT ISOLATED (subprocess fallback).")
+  if (incident?.mode === "replay") banners.push(`Replay: ${incident.id} is a playback of a recorded run. Nothing is executed.`)
+  else if (incident?.llm?.fallback_used) banners.push(`LLM unreachable (${incident.llm.fallback_reason}). This incident used cached recorded decisions.`)
+  else if (system?.mode === "cached" && !cachedChecks) banners.push("Cached mode: the agent replays recorded decisions; files, guardrails and the sandbox still run for real.")
+  if (system && !cachedChecks && !system.sandbox.isolated) banners.push("Docker is not running, so sandbox runs are not isolated (subprocess fallback).")
+
+  const items = system ? statusItems(system) : []
+  const degraded = items.some((i) => i.ok === false)
 
   const signature = banners.join("\u0000")
   const [open, setOpen] = useState(banners.length > 0)
@@ -46,50 +77,82 @@ export const Header: React.FC<HeaderProps> = ({ system, backendError, incident, 
   }, [signature])
 
   return (
-    <header className="border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md sticky top-0 z-40">
+    <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70">
       <div className={`grid transition-[grid-template-rows,opacity] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"}`}>
         <div className="overflow-hidden">
           {banners.map((b) => (
-            <div key={b} className="bg-amber-500/10 border-b border-amber-500/20 px-6 py-1.5 flex items-center gap-2 text-xs text-amber-300">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span>{b}</span>
+            <div key={b} role="status" className="flex items-start gap-2 border-b border-warning/20 bg-warning/[0.07] px-4 py-1.5 text-xs text-warning sm:px-6">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="leading-snug">{b}</span>
             </div>
           ))}
         </div>
       </div>
-      <div className="px-6 py-3 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="h-9 w-9 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-700 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-            <Shield className="h-5 w-5 text-white" />
+      <div className="flex h-14 items-center justify-between gap-3 px-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <ShieldCheck className="h-4 w-4" />
           </div>
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="text-base font-bold tracking-tight text-zinc-100">AutoSRE</h1>
-              <Badge variant="outline" className="text-[10px] py-0 px-1.5 text-zinc-400">Team Zero-Ops</Badge>
+              <h1 className="text-sm font-semibold tracking-tight">AutoSRE</h1>
+              <span className="hidden text-xs text-muted-foreground sm:inline">/ Team Zero-Ops</span>
             </div>
-            <p className="text-[11px] text-zinc-400 hidden sm:block">Detect · mitigate · fix · verify · deliver — humans merge</p>
+            <p className="hidden truncate text-xs text-muted-foreground lg:block">
+              Detect, mitigate, fix, verify and deliver. Humans merge.
+            </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          {/* Desktop: inline status */}
+          <div className="hidden items-center gap-1 xl:flex">
+            {items.map((item) => (
+              <Tooltip key={item.key}>
+                <TooltipTrigger asChild>
+                  <span className="flex cursor-default items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground">
+                    <Dot ok={item.ok} />
+                    {item.label}
+                  </span>
+                </TooltipTrigger>
+                {item.detail && <TooltipContent>{item.detail}</TooltipContent>}
+              </Tooltip>
+            ))}
+          </div>
+
+          {/* Tablet / mobile: compact status menu */}
           {system && (
-            <>
-              <Chip ok={system.database.reachable} icon={Database}
-                    label={system.database.reachable ? "DB connected" : "DB unreachable"} title={system.database.error || system.database.host} />
-              <Chip ok={system.sandbox.isolated} icon={Box} label={system.sandbox.isolated ? "Docker sandbox" : "Sandbox NOT isolated"} />
-              <Chip ok={system.mode !== "live" || system.llm.configured} icon={Bot}
-                    label={system.mode === "live" ? `${system.llm.provider}${system.llm.configured ? "" : " (no key)"}` : "Cached brain"}
-                    title={system.llm.model} />
-              <Chip ok={system.delivery.configured} icon={GitPullRequest}
-                    label={system.delivery.provider === "github" ? "GitHub" : "Local origin"} title={system.delivery.target} />
-              <Badge variant={system.mode === "live" ? "success" : "warning"} className="uppercase font-mono text-[11px] tracking-wider">
-                {system.mode}
-              </Badge>
-            </>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="gap-1.5 px-2 xl:hidden" aria-label="System status">
+                  <Activity className={cn(degraded ? "text-warning" : "text-success")} />
+                  <span className="hidden text-xs sm:inline">Status</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                <DropdownMenuLabel>System status</DropdownMenuLabel>
+                {items.map((item) => (
+                  <DropdownMenuItem key={item.key} className="items-start" onSelect={(e) => e.preventDefault()}>
+                    <item.icon className="mt-0.5 text-muted-foreground" />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 text-sm"><Dot ok={item.ok} />{item.label}</div>
+                      {item.detail && <div className="truncate text-xs text-muted-foreground">{item.detail}</div>}
+                    </div>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
-          <Button onClick={onOpenControls} variant="sre" size="sm" className="gap-1.5 text-xs">
-            <Sliders className="h-3.5 w-3.5" />
-            Controls
+
+          {system && (
+            <Badge variant={system.mode === "live" ? "success" : "warning"} className="font-mono uppercase tracking-wide">
+              {system.mode}
+            </Badge>
+          )}
+          <ModeToggle />
+          <Button onClick={onOpenControls} size="sm" className="px-2.5 sm:px-3" aria-label="Open controls">
+            <SlidersHorizontal />
+            <span className="hidden sm:inline">Controls</span>
           </Button>
         </div>
       </div>

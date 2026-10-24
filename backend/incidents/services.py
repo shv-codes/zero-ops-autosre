@@ -32,7 +32,8 @@ def dedupe_key_for(alert: dict) -> str:
     return f"{alert['metric']}:{alert['service']}"
 
 
-def ingest_alert(payload: dict, source: str = "webhook", start: bool = True) -> tuple[Incident, bool]:
+def ingest_alert(payload: dict, source: str = "webhook", start: bool = True,
+                 mode: str | None = None, approval_mode: str | None = None) -> tuple[Incident, bool]:
     """
     Create an incident for an alert and start the agent (FR-1.3).
 
@@ -61,8 +62,8 @@ def ingest_alert(payload: dict, source: str = "webhook", start: bool = True) -> 
             return existing, False
 
         incident = Incident.objects.create(
-            dedupe_key=key, alert=alert, source=source, mode=config.mode, max_attempts=config.max_attempts,
-            approval_mode=config.approval_mode,
+            dedupe_key=key, alert=alert, source=source, mode=mode or config.mode,
+            max_attempts=config.max_attempts, approval_mode=approval_mode or config.approval_mode,
         )
         value = f"{alert['value']}/{alert['max']}" if alert["max"] else str(alert["value"])
         TimelineEvent.objects.create(

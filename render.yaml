@@ -1,0 +1,42 @@
+# Render Blueprint for the AutoSRE backend (Django + uvicorn).
+# Render: New -> Blueprint -> pick this repo. Values marked `sync: false` are asked for in the dashboard.
+#
+# The hosted backend runs the Docker-free prototype: fixture database, cached sandbox checks,
+# local git "origin". Its SQLite state lives on the instance disk and resets on every deploy/restart.
+services:
+  - type: web
+    name: autosre-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput
+    # One worker on purpose: incidents run in background threads of this process.
+    startCommand: python manage.py migrate --noinput && uvicorn autosre_api.asgi:application --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DEBUG
+        value: "False"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: ALLOWED_HOSTS
+        value: .onrender.com
+      # Your Vercel URL, e.g. https://zero-ops-autosre.vercel.app (no trailing slash)
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      # cached = no API keys needed. Switch to live and set GROQ_API_KEY for the real LLM.
+      - key: AUTOSRE_MODE
+        value: cached
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SANDBOX_ENGINE
+        value: cached
+      - key: DELIVERY_PROVIDER
+        value: local
+      # No PostgreSQL to watch on Render; the prototype uses its own fixture database.
+      - key: AUTOSRE_MONITOR_ENABLED
+        value: "false"

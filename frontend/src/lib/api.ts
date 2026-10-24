@@ -67,13 +67,23 @@ export const api = {
   config: () => request<SystemConfig>("/config"),
   updateConfig: (patch: Partial<SystemConfig>) =>
     request<SystemConfig>("/config", { method: "PATCH", body: JSON.stringify(patch) }),
+  prototype: () => post<{ incident: IncidentSummary; message: string }>("/demo/prototype"),
   triggerDemo: () => post<{ traffic: TrafficStatus; message: string }>("/demo/trigger"),
   traffic: () => request<TrafficStatus>("/demo/traffic"),
   replay: () => post<{ incident: IncidentSummary }>("/demo/replay"),
-  teammatePush: () => post<{ sha: string }>("/demo/teammate-push"),
+  teammatePush: () => post<{ sha: string; branch: string; message: string }>("/demo/teammate-push"),
   decide: (id: string, body: { gate: string; decision: "approve" | "deny"; by?: string; note?: string }) =>
     post<{ recorded: boolean }>(`/incidents/${id}/decision`, body),
-  merge: (id: string) => post<{ merged: boolean; sha: string }>(`/incidents/${id}/merge`),
+  merge: (id: string) => post<{
+    merged: boolean
+    sha: string
+    branch: string
+    base: string
+    commit_message: string
+    github_url?: string
+  }>(`/incidents/${id}/merge`),
+  forceStop: (id: string) => post<{ stopped: boolean; id: string }>(`/incidents/${id}/stop`),
+  deleteIncident: (id: string) => request<{ deleted: boolean; id: string }>(`/incidents/${id}`, { method: "DELETE" }),
   reset: (opts: { clear_incidents?: boolean; reseed_repo?: boolean }) => post<Record<string, unknown>>("/demo/reset", opts),
   githubStatus: () => request<GitHubStatus>("/github/status"),
   githubDisconnect: () => post<{ disconnected: boolean; note: string }>("/github/disconnect"),

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from project.profile import ProfileError, load_profile
-from sandbox.runner import DockerSandbox, SubprocessSandbox, plan_steps
+from sandbox.runner import CachedSandbox, DockerSandbox, SubprocessSandbox, plan_steps
 from workspace.workspace import PathNotAllowed, Workspace
 
 REGRESSION_TEST_PATH = "tests/test_user_activity_releases_connection.py"
@@ -117,6 +117,34 @@ def _prepare(workspace, tmp_path, fixed: bool):
     original = workspace.export_tree(workspace.base_sha, tmp_path / "original")
     (original / REGRESSION_TEST_PATH).write_text(REGRESSION_TEST)
     return load_profile(workspace.root), original
+
+
+def test_cached_sandbox_fails_the_leak_and_passes_the_fix(workspace, tmp_path):
+    profile, original = _prepare(workspace, tmp_path, fixed=False)
+    leaked = CachedSandbox().run(profile, workspace.root, original, REGRESSION_TEST_PATH)
+    assert leaked["engine"] == "cached" and leaked["isolated"] is False
+    assert leaked["reproduced"] is True and leaked["passed"] is False and leaked["failed_step"] == "test"
+    assert "python manage.py check" in leaked["output"] and "pytest" in leaked["output"]
+    assert "never returned to the pool" in leaked["output"] and "NOT ISOLATED" not in leaked["output"]
+
+    # The recorded first attempt puts release() after return. The connection is still leaked.
+    views = workspace.read_file("analytics/views.py")
+    return_line = '    return JsonResponse({"status": "success", "count": len(data), "data": data})'
+    workspace.write_file("analytics/views.py", views.replace(return_line, return_line + "\n    report_pool.release(conn)", 1))
+    flawed = CachedSandbox().run(profile, workspace.root, original, REGRESSION_TEST_PATH)
+    assert flawed["passed"] is False and flawed["reproduced"] is True
+
+    clean = (original / "analytics/views.py").read_text(encoding="utf-8").replace(LEAK, FIX)
+    workspace.write_file("analytics/views.py", clean)
+    fixed = CachedSandbox().run(profile, workspace.root, original, REGRESSION_TEST_PATH)
+    assert fixed["passed"] is True and fixed["reproduced"] is True and fixed["exit_code"] == 0
+    commands = [step["command"] for step in fixed["steps"]]
+    assert "python manage.py check" in commands and "python -m pytest" in commands
+
+    # Conflict repair keeps the context manager and the teammate's LIMIT 100.
+    workspace.write_file("analytics/views.py", clean.replace("LIMIT 50", "LIMIT 100", 1))
+    resolved = CachedSandbox().run(profile, workspace.root, original, REGRESSION_TEST_PATH)
+    assert resolved["passed"] is True and resolved["failed_step"] is None
 
 
 def test_plan_steps_order(workspace):

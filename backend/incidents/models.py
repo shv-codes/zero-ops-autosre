@@ -237,4 +237,10 @@ class RuntimeConfig(models.Model):
                 "monitor_enabled": settings.AUTOSRE["MONITOR_ENABLED"],
             },
         )
+        # A previous boot stored an inline env comment as the provider name
+        # ("groq # groq | nvidia"), so the configured API key never matched.
+        known = set(settings.LLM["PROVIDERS"])
+        if obj.llm_provider not in known:
+            obj.llm_provider = settings.LLM["PROVIDER"] if settings.LLM["PROVIDER"] in known else "groq"
+            obj.save(update_fields=["llm_provider", "updated_at"])
         return obj
